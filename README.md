@@ -1,15 +1,18 @@
 # TikTok-Live-Connector
-A Node.js library to receive live stream events such as comments and gifts in realtime from [TikTok LIVE](https://www.tiktok.com/live) by connecting to TikTok's internal WebCast push service. The package includes a wrapper that connects to the WebCast service using just the username (`uniqueId`). This allows you to connect to your own live chat as well as the live chat of other streamers. No credentials are required. Besides [Chat Comments](#chat), other events such as [Members Joining](#member), [Gifts](#gift), [Viewers](#roomuser), [Follows](#social), [Shares](#social), [Questions](#questionnew), [Likes](#like) and [Battles](#linkmicbattle) can be tracked. You can also send [automatic messages](#send-chat-messages) into the chat by providing your Session ID.
+A Node.js library to receive live stream events such as comments and gifts in realtime from [TikTok LIVE](https://www.tiktok.com/live) by connecting to TikTok's internal WebCast push service. The package includes a wrapper that connects to the WebCast service using just the username (`uniqueId`). This allows you to connect to your own live chat as well as the live chat of other streamers. No credentials are required. Besides [Chat Comments](#chat), other events such as [Members Joining](#member), [Gifts](#gift), [Subscriptions](#subscribe), [Viewers](#roomuser), [Follows](#social), [Shares](#social), [Questions](#questionnew), [Likes](#like) and [Battles](#linkmicbattle) can be tracked. You can also send [automatic messages](#send-chat-messages) into the chat by providing your Session ID.
 
-### Demo Project: [https://tiktok-chat-reader.zerody.one/](https://tiktok-chat-reader.zerody.one/)
+### Example Project: [https://tiktok-chat-reader.zerody.one/](https://tiktok-chat-reader.zerody.one/)
 
 Do you prefer other programming languages?
 - **Python** rewrite: [TikTokLive](https://github.com/isaackogan/TikTokLive) by [@isaackogan](https://github.com/isaackogan)
 - **Go** rewrite: [GoTikTokLive](https://github.com/Davincible/gotiktoklive) by [@Davincible](https://github.com/Davincible)
+- **C#** rewrite: [TikTokLiveSharp](https://github.com/sebheron/TikTokLiveSharp) by [@sebheron](https://github.com/sebheron)
 
 **NOTE:** This is not an official API. It's a reverse engineering project.
 
 **NOTE:** This JavaScript library is intended for use in [Node.js](https://nodejs.org/) environments. If you want to process or display the data in the browser (client-side), you need to transfer the data from the Node.js environment to the browser. A good approach for this is to use [Socket.IO](https://socket.io/) or a different low-latency communication framework. A complete example project can be found here: [TikTok-Chat-Reader](https://github.com/zerodytrash/TikTok-Chat-Reader)
+
+> **UPDATE**:<br>Due to a change on the part of TikTok, versions prior **v0.9.23** are no longer functional. If you are using one of these versions, upgrade to the latest version using the `npm update` command.
 
 #### Overview
 - [Getting started](#getting-started)
@@ -126,10 +129,15 @@ Message Events:
 - [`roomUser`](#roomuser)
 - [`like`](#like)
 - [`social`](#social)
+- [`emote`](#emote)
+- [`envelope`](#envelope)
 - [`questionNew`](#questionnew)
 - [`linkMicBattle`](#linkmicbattle)
 - [`linkMicArmies`](#linkmicarmies)
 - [`liveIntro`](#liveintro)
+
+Other Events:
+- [`subscribe`](#subscribe)
 
 ### Control Events
 
@@ -156,8 +164,13 @@ tiktokChatConnection.on('disconnected', () => {
 Triggered when the live stream gets terminated by the host. Will also trigger the [`disconnected`](#disconnected) event.
 
 ```javascript
-tiktokChatConnection.on('streamEnd', () => {
-    console.log('Stream ended');
+tiktokChatConnection.on('streamEnd', (actionId) => {
+    if (actionId === 3) {
+        console.log('Stream ended by user');
+    }
+    if (actionId === 4) {
+        console.log('Stream ended by platform moderator (ban)');
+    }
 })
 ```
 
@@ -209,7 +222,11 @@ Data structure:
   nickname: 'Zerody One',
   profilePictureUrl: 'https://p16-sign-va.tiktokcdn.com/...',
   followRole: 1, // 0 = none; 1 = follower; 2 = friends
-  userBadges: [] // e.g. Moderator badge
+  userBadges: [], // e.g. Moderator badge
+  isModerator: true,
+  isNewGifter: false,
+  isSubscriber: false,
+  topGifterRank: 3
 }
 ```
 
@@ -235,8 +252,24 @@ Data structure:
         {
             type: 'pm_mt_moderator_im', 
             name: 'Moderator'
+        },
+        {
+            // Top Gifter Badge
+            type: 'image',
+            displayType: 1,
+            url: 'https://p19-webcast.tiktokcdn.com/webcast-va/ranklist_top_gifter_3.png~tplv-obj.image' 
+        },
+        {
+            // Subscriber Badge
+            type: 'image',
+            displayType: 1,
+            url: 'https://p19-webcast.tiktokcdn.com/webcast-va/e1b3cdc5d3a687ca5602d84c09117d9b~tplv-obj.image'
         }
-    ]
+    ],
+    isModerator: true,
+    isNewGifter: false,
+    isSubscriber: true,
+    topGifterRank: 3
 }
 ```
 
@@ -268,7 +301,11 @@ Data structure:
   nickname: 'Zerody One',
   followRole: 0,
   userBadges: [],
-  profilePictureUrl: 'https://p16-sign.tiktokcdn-us.com/...',  
+  profilePictureUrl: 'https://p16-sign.tiktokcdn-us.com/...',
+  isModerator: true,
+  isNewGifter: false,
+  isSubscriber: true,
+  topGifterRank: 3,
   
   // Gift Details
   giftId: 5655,
@@ -284,7 +321,7 @@ Data structure:
     // This will be filled when you enable the `enableExtendedGiftInfo` option
   },
   
-  // Receiver Details
+  // Receiver Details (can also be a guest broadcaster)
   receiverUserId: '7044962356446839814'
 }
 ```
@@ -339,6 +376,52 @@ Data structure:
   profilePictureUrl: 'https://p16-sign-va.tiktokcdn.com/...',
   displayType: 'pm_main_follow_message_viewer_2', // or 'pm_mt_guidance_share' for sharing
   label: '{0:user} followed the host'
+}
+```
+
+#### `emote`
+Triggered every time a subscriber sends an emote (sticker).
+
+```javascript
+tiktokChatConnection.on('emote', data => {
+    console.log('emote received', data);
+})
+```
+
+Data structure:
+```javascript
+{
+  userId: '6889810001851728898',
+  uniqueId: 'zerodytest',
+  nickname: 'Zerody One',
+  profilePictureUrl: 'https://p77-sign-va.tiktokcdn.com/...',        
+  followRole: 2,
+  userBadges: [ ],
+  isSubscriber: true,
+  topGifterRank: 3,
+  emoteId: '7101355900887796486',
+  emoteImageUrl: 'https://p19-webcast.tiktokcdn.com/...'
+}
+```
+
+#### `envelope`
+Triggered every time someone sends a treasure chest.
+
+```javascript
+tiktokChatConnection.on('envelope', data => {
+    console.log('envelope received', data);
+})
+```
+
+Data structure:
+```javascript
+{
+  userId: '6889810001851728898',
+  uniqueId: 'zerodytest',
+  nickname: 'Zerody One',
+  coins: 220,
+  canOpen: 10,
+  timestamp: 1654802658
 }
 ```
 
@@ -451,6 +534,17 @@ Triggered when a live intro message appears.
 ```javascript
 tiktokChatConnection.on('liveIntro', (msg) => {
     console.log(msg);
+})
+```
+
+### Other Events
+
+#### `subscribe`
+Triggers when a user creates a subscription.
+
+```javascript
+tiktokChatConnection.on('subscribe', (data) => {
+    console.log(data.uniqueId, "subscribed!");
 })
 ```
 

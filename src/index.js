@@ -4,7 +4,7 @@ const TikTokHttpClient = require('./lib/tiktokHttpClient.js');
 const WebcastWebsocket = require('./lib/webcastWebsocket.js');
 const { getRoomIdFromMainPageHtml, validateAndNormalizeUniqueId } = require('./lib/tiktokUtils.js');
 const { simplifyObject } = require('./lib/webcastDataConverter.js');
-const { deserializeMessage } = require('./lib/webcastProtobuf.js');
+const { deserializeMessage, deserializeWebsocketMessage } = require('./lib/webcastProtobuf.js');
 
 const Config = require('./lib/webcastConfig.js');
 
@@ -13,6 +13,7 @@ const ControlEvents = {
     DISCONNECTED: 'disconnected',
     ERROR: 'error',
     RAWDATA: 'rawData',
+    DECODEDDATA: 'decodedData',
     STREAMEND: 'streamEnd',
     WSCONNECTED: 'websocketConnected',
 };
@@ -28,6 +29,12 @@ const MessageEvents = {
     LINKMICBATTLE: 'linkMicBattle',
     LINKMICARMIES: 'linkMicArmies',
     LIVEINTRO: 'liveIntro',
+    EMOTE: 'emote',
+    ENVELOPE: 'envelope',
+};
+
+const CustomEvents = {
+    SUBSCRIBE: 'subscribe',
 };
 
 /**
@@ -59,6 +66,7 @@ class WebcastPushConnection extends EventEmitter {
      * @param {boolean} [options[].fetchRoomInfoOnConnect=true] Fetch the room info (room status, streamer info, etc.) on connect (will be returned when calling connect())
      * @param {boolean} [options[].enableExtendedGiftInfo=false] Enable this option to get extended information on 'gift' events like gift name and cost
      * @param {boolean} [options[].enableWebsocketUpgrade=true] Use WebSocket instead of request polling if TikTok offers it
+     * @param {boolean} [options[].enableRequestPolling=true] Use request polling if no WebSocket upgrade is offered. If `false` an exception will be thrown if TikTok does not offer a WebSocket upgrade.
      * @param {number} [options[].requestPollingIntervalMs=1000] Request polling interval if WebSocket is not used
      * @param {string} [options[].sessionId=null] The session ID from the "sessionid" cookie is required if you want to send automated messages in the chat.
      * @param {object} [options[].clientParams={}] Custom client params for Webcast API
@@ -73,7 +81,7 @@ class WebcastPushConnection extends EventEmitter {
         this.#setOptions(options || {});
 
         this.#uniqueStreamerId = validateAndNormalizeUniqueId(uniqueId);
-        this.#httpClient = new TikTokHttpClient(this.#options.requestHeaders, this.#options.requestOptions);
+        this.#httpClient = new TikTokHttpClient(this.#options.requestHeaders, this.#options.requestOptions, this.#options.sessionId);
 
         this.#clientParams = {
             ...Config.DEFAULT_CLIENT_PARAMS,
@@ -91,6 +99,7 @@ class WebcastPushConnection extends EventEmitter {
                 fetchRoomInfoOnConnect: true,
                 enableExtendedGiftInfo: false,
                 enableWebsocketUpgrade: true,
+                enableRequestPolling: true,
                 requestPollingIntervalMs: 1000,
                 sessionId: null,
                 clientParams: {},
@@ -110,6 +119,7 @@ class WebcastPushConnection extends EventEmitter {
         this.#isPollingEnabled = false;
         this.#isWsUpgradeDone = false;
         this.#clientParams.cursor = '';
+        this.#clientParams.internal_ext = '';
     }
 
     /**
@@ -149,9 +159,21 @@ class WebcastPushConnection extends EventEmitter {
 
             this.#isConnected = true;
 
-            // Sometimes no upgrade to websocket is offered by TikTok
-            // In that case we use request polling
+            // Sometimes no upgrade to WebSocket is offered by TikTok
+            // In that case we use request polling (if enabled and possible)
             if (!this.#isWsUpgradeDone) {
+                if (!this.#options.enableRequestPolling) {
+                    throw new Error('TikTok does not offer a websocket upgrade and request polling is disabled (`enableRequestPolling` option).');
+                }
+
+                if (!this.#options.sessionId) {
+                    // We cannot use request polling if the user has no sessionid defined.
+                    // The reason for this is that TikTok needs a valid signature if the user is not logged in.
+                    // Signing a request every second would generate too much traffic to the signing server.
+                    // If a sessionid is present a signature is not required.
+                    throw new Error('TikTok does not offer a websocket upgrade. Please provide a valid `sessionId` to use request polling instead.');
+                }
+
                 this.#startFetchRoomPolling();
             }
 
@@ -245,7 +267,7 @@ class WebcastPushConnection extends EventEmitter {
             }
 
             // Add the session cookie to the CookieJar
-            this.#httpClient.cookieJar.setCookie('sessionid', this.#options.sessionId);
+            this.#httpClient.setSessionId(this.#options.sessionId);
 
             // Submit the chat request
             let requestParams = { ...this.#clientParams, content: text };
@@ -273,16 +295,34 @@ class WebcastPushConnection extends EventEmitter {
      * @param {string} messageType
      * @param {Buffer} messageBuffer
      */
-    decodeProtobufMessage(messageType, messageBuffer) {
-        let webcastMessage = deserializeMessage(messageType, messageBuffer);
-        this.#processWebcastResponse({
-            messages: [
-                {
-                    decodedData: webcastMessage,
-                    type: messageType,
-                },
-            ],
-        });
+    async decodeProtobufMessage(messageType, messageBuffer) {
+        switch (messageType) {
+            case 'WebcastResponse': {
+                let decodedWebcastResponse = deserializeMessage(messageType, messageBuffer);
+                this.#processWebcastResponse(decodedWebcastResponse);
+                break;
+            }
+
+            case 'WebcastWebsocketMessage': {
+                let decodedWebcastWebsocketMessage = await deserializeWebsocketMessage(messageBuffer);
+                if (typeof decodedWebcastWebsocketMessage.webcastResponse === 'object') {
+                    this.#processWebcastResponse(decodedWebcastWebsocketMessage.webcastResponse);
+                }
+                break;
+            }
+
+            default: {
+                let webcastMessage = deserializeMessage(messageType, messageBuffer);
+                this.#processWebcastResponse({
+                    messages: [
+                        {
+                            decodedData: webcastMessage,
+                            type: messageType,
+                        },
+                    ],
+                });
+            }
+        }
     }
 
     async #retrieveRoomId() {
@@ -322,7 +362,7 @@ class WebcastPushConnection extends EventEmitter {
 
         while (this.#isPollingEnabled) {
             try {
-                await this.#fetchRoomData();
+                await this.#fetchRoomData(false);
             } catch (err) {
                 this.#handleError(err, 'Error while fetching webcast data via request polling');
             }
@@ -332,17 +372,26 @@ class WebcastPushConnection extends EventEmitter {
     }
 
     async #fetchRoomData(isInitial) {
-        let webcastResponse = await this.#httpClient.getDeserializedObjectFromWebcastApi('im/fetch/', this.#clientParams, 'WebcastResponse');
+        let webcastResponse = await this.#httpClient.getDeserializedObjectFromWebcastApi('im/fetch/', this.#clientParams, 'WebcastResponse', isInitial);
         let upgradeToWsOffered = !!webcastResponse.wsUrl && !!webcastResponse.wsParam;
 
-        // Set cursor param to continue with the next request
-        if (webcastResponse.cursor) {
-            this.#clientParams.cursor = webcastResponse.cursor;
+        if (!webcastResponse.cursor) {
+            if (isInitial) {
+                throw new Error('Missing cursor in initial fetch response.');
+            } else {
+                this.#handleError(null, 'Missing cursor in fetch response.');
+            }
         }
 
-        // Upgrade to Websocket offered? => Try upgrade
-        if (!this.#isWsUpgradeDone && this.#options.enableWebsocketUpgrade && upgradeToWsOffered) {
-            await this.#tryUpgradeToWebsocket(webcastResponse);
+        // Set cursor and internal_ext param to continue with the next request
+        if (webcastResponse.cursor) this.#clientParams.cursor = webcastResponse.cursor;
+        if (webcastResponse.internalExt) this.#clientParams.internal_ext = webcastResponse.internalExt;
+
+        if (isInitial) {
+            // Upgrade to Websocket offered? => Try upgrade
+            if (this.#options.enableWebsocketUpgrade && upgradeToWsOffered) {
+                await this.#tryUpgradeToWebsocket(webcastResponse);
+            }
         }
 
         // Skip processing initial data if option disabled
@@ -358,6 +407,7 @@ class WebcastPushConnection extends EventEmitter {
             // Websocket specific params
             let wsParams = {
                 imprp: webcastResponse.wsParam.value,
+                compress: 'gzip',
             };
 
             // Wait until ws connected, then stop request polling
@@ -368,7 +418,7 @@ class WebcastPushConnection extends EventEmitter {
 
             this.emit(ControlEvents.WSCONNECTED, this.#websocket);
         } catch (err) {
-            this.#handleError(err, 'Upgrade to websocket failed. Using request polling...');
+            this.#handleError(err, 'Upgrade to websocket failed');
         }
     }
 
@@ -388,6 +438,9 @@ class WebcastPushConnection extends EventEmitter {
             this.#websocket.on('connectFailed', (err) => reject(`Websocket connection failed, ${err}`));
             this.#websocket.on('webcastResponse', (msg) => this.#processWebcastResponse(msg));
             this.#websocket.on('messageDecodingFailed', (err) => this.#handleError(err, 'Websocket message decoding failed'));
+
+            // Hard timeout if the WebSocketClient library does not handle connect errors correctly.
+            setTimeout(() => reject('Websocket not responding'), 30000);
         });
     }
 
@@ -403,10 +456,16 @@ class WebcastPushConnection extends EventEmitter {
             .forEach((message) => {
                 let simplifiedObj = simplifyObject(message.decodedData);
 
+                this.emit(ControlEvents.DECODEDDATA, message.type, simplifiedObj, message.binary);
+
                 switch (message.type) {
                     case 'WebcastControlMessage':
-                        if (message.decodedData.action === 3) {
-                            this.emit(ControlEvents.STREAMEND);
+                        // Known control actions:
+                        // 3 = Stream terminated by user
+                        // 4 = Stream terminated by platform moderator (ban)
+                        const action = message.decodedData.action;
+                        if ([3, 4].includes(action)) {
+                            this.emit(ControlEvents.STREAMEND, { action });
                             this.disconnect();
                         }
                         break;
@@ -444,6 +503,15 @@ class WebcastPushConnection extends EventEmitter {
                     case 'WebcastLiveIntroMessage':
                         this.emit(MessageEvents.LIVEINTRO, simplifiedObj);
                         break;
+                    case 'WebcastEmoteChatMessage':
+                        this.emit(MessageEvents.EMOTE, simplifiedObj);
+                        break;
+                    case 'WebcastEnvelopeMessage':
+                        this.emit(MessageEvents.ENVELOPE, simplifiedObj);
+                        break;
+                    case 'WebcastSubNotifyMessage':
+                        this.emit(CustomEvents.SUBSCRIBE, simplifiedObj);
+                        break;
                 }
             });
     }
@@ -457,4 +525,6 @@ class WebcastPushConnection extends EventEmitter {
 
 module.exports = {
     WebcastPushConnection,
+    signatureProvider: require('./lib/tiktokSignatureProvider'),
+    webcastProtobuf: require('./lib/webcastProtobuf.js'),
 };

@@ -15,13 +15,17 @@ function simplifyObject(webcastObject) {
     }
 
     if (webcastObject.event) {
-        Object.assign(webcastObject, webcastObject.event);
+        Object.assign(webcastObject, getEventAttributes(webcastObject.event));
         delete webcastObject.event;
     }
 
     if (webcastObject.eventDetails) {
         Object.assign(webcastObject, webcastObject.eventDetails);
         delete webcastObject.eventDetails;
+    }
+
+    if (webcastObject.topViewers) {
+        webcastObject.topViewers = getTopViewerAttributes(webcastObject.topViewers);
     }
 
     if (webcastObject.battleUsers) {
@@ -91,31 +95,126 @@ function simplifyObject(webcastObject) {
                 webcastObject.timestamp = parseInt(webcastObject.timestamp);
             }
         }
+
+        if (webcastObject.groupId) {
+            webcastObject.groupId = webcastObject.groupId.toString();
+        }
+
+        if (typeof webcastObject.monitorExtra === 'string' && webcastObject.monitorExtra.indexOf('{') === 0) {
+            try {
+                webcastObject.monitorExtra = JSON.parse(webcastObject.monitorExtra);
+            } catch (err) {}
+        }
+    }
+
+    if (webcastObject.emote) {
+        webcastObject.emoteId = webcastObject.emote?.emoteId;
+        webcastObject.emoteImageUrl = webcastObject.emote?.image?.imageUrl;
+        delete webcastObject.emote;
+    }
+
+    if (webcastObject.treasureBoxUser) {
+        // holy crap
+        Object.assign(webcastObject, getUserAttributes(webcastObject.treasureBoxUser?.user2?.user3[0]?.user4?.user || {}));
+        delete webcastObject.treasureBoxUser;
+    }
+
+    if (webcastObject.treasureBoxData) {
+        Object.assign(webcastObject, webcastObject.treasureBoxData);
+        delete webcastObject.treasureBoxData;
+        webcastObject.timestamp = parseInt(webcastObject.timestamp);
     }
 
     return Object.assign({}, webcastObject);
 }
 
 function getUserAttributes(webcastUser) {
-    return {
-        userId: webcastUser.userId.toString(),
+    let userAttributes = {
+        userId: webcastUser.userId?.toString(),
+        secUid: webcastUser.secUid?.toString(),
         uniqueId: webcastUser.uniqueId !== '' ? webcastUser.uniqueId : undefined,
         nickname: webcastUser.nickname !== '' ? webcastUser.nickname : undefined,
-        profilePictureUrl: webcastUser.profilePicture?.urls[2],
-        followRole: webcastUser.extraAttributes?.followRole,
-        userBadges: mapBadges(webcastUser.badge),
+        profilePictureUrl: getPreferredPictureFormat(webcastUser.profilePicture?.urls),
+        followRole: webcastUser.followInfo?.followStatus,
+        userBadges: mapBadges(webcastUser.badges),
+        userDetails: {
+            createTime: webcastUser.createTime?.toString(),
+            bioDescription: webcastUser.bioDescription,
+            profilePictureUrls: webcastUser.profilePicture?.urls,
+        },
     };
+
+    if (webcastUser.followInfo) {
+        userAttributes.followInfo = {
+            followingCount: webcastUser.followInfo.followingCount,
+            followerCount: webcastUser.followInfo.followerCount,
+            followStatus: webcastUser.followInfo.followStatus,
+            pushStatus: webcastUser.followInfo.pushStatus,
+        };
+    }
+
+    userAttributes.isModerator = userAttributes.userBadges.some((x) => x.type && x.type.toLowerCase().includes('moderator'));
+    userAttributes.isNewGifter = userAttributes.userBadges.some((x) => x.type && x.type.toLowerCase().includes('live_ng_'));
+    userAttributes.isSubscriber = userAttributes.userBadges.some((x) => x.url && x.url.toLowerCase().includes('/sub_'));
+    userAttributes.topGifterRank =
+        userAttributes.userBadges
+            .find((x) => x.url && x.url.includes('/ranklist_top_gifter_'))
+            ?.url.match(/(?<=ranklist_top_gifter_)(\d+)(?=.png)/g)
+            ?.map(Number)[0] ?? null;
+
+    return userAttributes;
 }
 
-function mapBadges(badge) {
-    if (!badge || !Array.isArray(badge.badges)) return [];
+function getEventAttributes(event) {
+    if (event.msgId) event.msgId = event.msgId.toString();
+    if (event.createTime) event.createTime = event.createTime.toString();
+    return event;
+}
 
-    let badges = [];
-    badge.badges.forEach((badge) => {
-        badges.push(Object.assign({}, badge));
+function getTopViewerAttributes(topViewers) {
+    return topViewers.map((viewer) => {
+        return {
+            user: viewer.user ? getUserAttributes(viewer.user) : null,
+            coinCount: viewer.coinCount ? parseInt(viewer.coinCount) : 0,
+        };
     });
+}
 
-    return badges;
+function mapBadges(badges) {
+    let simplifiedBadges = [];
+
+    if (Array.isArray(badges)) {
+        badges.forEach((innerBadges) => {
+            if (Array.isArray(innerBadges.badges)) {
+                innerBadges.badges.forEach((badge) => {
+                    simplifiedBadges.push(Object.assign({}, badge));
+                });
+            }
+
+            if (Array.isArray(innerBadges.imageBadges)) {
+                innerBadges.imageBadges.forEach((badge) => {
+                    if (badge && badge.image && badge.image.url) {
+                        simplifiedBadges.push({ type: 'image', displayType: badge.displayType, url: badge.image.url });
+                    }
+                });
+            }
+        });
+    }
+
+    return simplifiedBadges;
+}
+
+function getPreferredPictureFormat(pictureUrls) {
+    if (!pictureUrls || !Array.isArray(pictureUrls) || !pictureUrls.length) {
+        return null;
+    }
+
+    return (
+        pictureUrls.find((x) => x.includes('100x100') && x.includes('.webp')) ||
+        pictureUrls.find((x) => x.includes('100x100') && x.includes('.jpeg')) ||
+        pictureUrls.find((x) => !x.includes('shrink')) ||
+        pictureUrls[0]
+    );
 }
 
 module.exports = {
